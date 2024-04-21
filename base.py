@@ -32,31 +32,6 @@ def inet_to_str(inet):
         return inet_ntop(AF_INET6, inet)
 
 
-class SeqIntervalItem:
-    def __init__(self, start: int, end: int) -> None:
-        self.start = start
-        self.end = end
-
-    def __lt__(self, other):
-        return self.start <= other.start
-
-    def __eq__(self, value: object) -> bool:
-        return self.start == value.start and self.end == value.end
-
-    def in_iterval(self, seq: int) -> bool:
-        return self.start <= seq and self.end >= seq
-
-    def in_left(self, seq: int) -> bool:
-        return seq < self.start
-
-    def in_right(self, seq: int) -> bool:
-        return seq > self.end
-
-    def add_seq(self, seq: int) -> bool:
-        self.start = min(self.start, seq)
-        self.end = max(self.end, seq)
-
-
 class SubStreamBase:
 
     def __init__(self, head_seq: int, next_seq: int) -> None:
