@@ -28,7 +28,14 @@ class NIOWriter:
         self.task = []
         self.dir_path = dir
 
+    def _is_empty_content(self, data):
+        if len(data) == 0:
+            return True
+        return all(len(d) == 0 for d in data) if isinstance(data, list) else False
+
     async def write(self, abs_file_path, data):
+        if self._is_empty_content(data):
+            return
         async with aiofiles.open(abs_file_path,
                                  'ab+', executor=self.executor) as f, self.semaphore:
             if isinstance(data, list):
@@ -73,7 +80,7 @@ class NIOWriter:
                             break
                     finally:
                         self._lock_for_dic.release()
-                if self.tag_que.empty():
+                if not self.tag_que.empty():
                     if self.tag_que.get():
                         self.tag = True
                     self.tag_que.task_done()
@@ -85,7 +92,7 @@ class NIOWriter:
                 self._lock_for_dic.acquire()
                 try:
                     if abs_path in self.dic:
-                        self.dic[abs_path].append(datas)
+                        self.dic[abs_path].extend(datas)
                     else:
                         self.dic[abs_path] = datas
                         self.add_in_loop(abs_path, datas)

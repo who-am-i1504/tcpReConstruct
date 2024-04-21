@@ -34,10 +34,13 @@ def inet_to_str(inet):
 
 class SubStreamBase:
 
-    def __init__(self, head_seq: int, next_seq: int) -> None:
+    def __init__(self, head_seq: int, next_seq: int, writer: NIOWriter, abs_path: str, timestamp: time.time()) -> None:
         self.head_seq = head_seq
         self.next_seq = next_seq
         self.datas = []
+        self.writer = writer
+        self.timestamp = timestamp
+        self.abs_path = abs_path
 
     def is_head_for_seq(self, seq: int) -> bool:
         return self.head_seq == seq
@@ -61,6 +64,12 @@ class SubStreamBase:
         self.head_seq = min(self.head_seq, stream.head_seq)
         self.next_seq = max(self.next_seq, stream.next_seq)
 
+    def flush(self):
+        if self.writer is None:
+            return
+        self.writer.put(self.abs_path, self.datas)
+        self.datas = []
+
 
 class StreamBase:
     def __init__(self, src: Buffer, dst: Buffer,
@@ -78,19 +87,15 @@ class StreamBase:
         self.timestamp = timestamp
         self.min_seq_dic = {}
 
-    def _append_file(self, seq: int):
-        self.start_output = True
-        if self.target_writer is None:
-            return
-        self.target_writer.put(f'{self._file_name()}_{seq}', self.min_seq_dic[seq].datas)
-        self.min_seq_dic[seq].datas=[]
-    
+    def _append_file(self, stream: SubStreamBase):
+        stream.flush()
+
     def flush(self):
         for seq, seq_stream in self.min_seq_dic.items():
-            self.target_writer.put(f'{self._file_name()}_{seq}', seq_stream.datas)
-            seq_stream.datas = []
-    def _file_name(self):
-        return f'{self.timestamp}-{inet_to_str(self.src)}-{self.sport}_{inet_to_str(self.dst)}-{self.dport}'
+            seq_stream.flush()
+
+    def _file_name(self, seq_for_stream=0):
+        return f'{self.timestamp}-{inet_to_str(self.src)}-{self.sport}_{inet_to_str(self.dst)}-{self.dport}_{seq_for_stream}'
 
     def append_pkt(self, pkt: TCP) -> bool:
         seq = pkt.seq
@@ -99,11 +104,11 @@ class StreamBase:
             next_seq += 1
         if seq not in self.dic:
             self._insert_in_stream(seq, next_seq, pkt)
-            return
+            return False
         pkts = self.dic[seq]
-        if pkts.is_head_for_seq(seq) and pkts.is_euqals_for_head_and_next():
+        if pkts.is_head_for_seq(seq) and not pkts.is_euqals_for_head_and_next():
             # TODO 重传判断，待完善
-            return
+            return self._fin_deal(pkts=None, pkt=pkt)
 
         self._construct_mult_stream(seq, next_seq, pkt)
         return self._fin_deal(pkts, pkt)
@@ -111,7 +116,8 @@ class StreamBase:
     def _fin_deal(self, pkts: SubStreamBase, pkt: TCP) -> bool:
         if (pkt.flags & TH_FIN) == TH_FIN:
             # 刷新文件
-            self._append_file(pkts.head_seq)
+            if pkts is not None:
+                self._append_file(pkts)
             return True
         return False
 
@@ -149,7 +155,8 @@ class StreamBase:
 
     def _build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
-        new_stream = SubStreamBase(seq, next_seq)
+        new_stream = SubStreamBase(seq, next_seq, self.target_writer, self._file_name(
+            self.stream_count), self.timestamp)
         self.dic[seq] = new_stream
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
@@ -185,10 +192,10 @@ class ReContructBase:
                 if tcp is None:
                     continue
                 self.__construct(tcp, src, dst)
-        
+
         for stream_value in self.stream_dic.values():
             stream_value.flush()
-        
+
         while self.write_thread.is_alive():
             self.target_writer.quit()
             time.sleep(1)
@@ -215,7 +222,8 @@ class ReContructBase:
         dport = pkt.dport
         key = self._hash_for_four_meta(src, sport, dst, dport)
         if key not in self.stream_dic:
-            self.stream_dic[key] = StreamBase(src, dst, sport, dport, writer=self.target_writer)
+            self.stream_dic[key] = StreamBase(
+                src, dst, sport, dport, writer=self.target_writer)
 
         if self.stream_dic[key].append_pkt(pkt):
             self.stream_dic.pop(key)
