@@ -14,7 +14,7 @@ from socket import AF_INET6
 import time
 from typing_extensions import Buffer, LiteralString, TypeAlias
 import os
-from .writer import NIOWriter
+from writer import NIOWriter
 
 
 def inet_to_str(inet):
@@ -69,19 +69,26 @@ class StreamBase:
         self.dst = dst
         self.sport = sport
         self.dport = dport
-        self.dic[int, SubStreamBase] = {}
+        self.dic = {}
         # self.seq_packet = {}
         # self.ack_packet = {}
         self.stream_count = 0
         self.target_writer = writer
         self.start_output = False
         self.timestamp = timestamp
+        self.min_seq_dic = {}
 
-    def _append_file(self):
+    def _append_file(self, seq: int):
         self.start_output = True
         if self.target_writer is None:
             return
-
+        self.target_writer.put(f'{self._file_name()}_{seq}', self.min_seq_dic[seq].datas)
+        self.min_seq_dic[seq].datas=[]
+    
+    def flush(self):
+        for seq, seq_stream in self.min_seq_dic.items():
+            self.target_writer.put(f'{self._file_name()}_{seq}', seq_stream.datas)
+            seq_stream.datas = []
     def _file_name(self):
         return f'{self.timestamp}-{inet_to_str(self.src)}-{self.sport}_{inet_to_str(self.dst)}-{self.dport}'
 
@@ -91,6 +98,7 @@ class StreamBase:
         if (pkt.flags & TH_SYN) == TH_SYN:
             next_seq += 1
         if seq not in self.dic:
+            self._insert_in_stream(seq, next_seq, pkt)
             return
         pkts = self.dic[seq]
         if pkts.is_head_for_seq(seq) and pkts.is_euqals_for_head_and_next():
@@ -98,22 +106,23 @@ class StreamBase:
             return
 
         self._construct_mult_stream(seq, next_seq, pkt)
-        return self._fin_deal(pkt)
+        return self._fin_deal(pkts, pkt)
 
-    def _fin_deal(self, pkt: TCP) -> bool:
+    def _fin_deal(self, pkts: SubStreamBase, pkt: TCP) -> bool:
         if (pkt.flags & TH_FIN) == TH_FIN:
             # 刷新文件
-            self._append_file()
+            self._append_file(pkts.head_seq)
             return True
         return False
 
     def _construct_mult_stream(self, seq: int, next_seq: int, pkt: TCP):
         # 清理seqkey
         seq_stream = self.dic.pop(seq)
-        seq_stream.append_pkt(pkt)
+        seq_stream.append_pkt(pkt, next_seq)
         next_seq_key = next_seq
         while next_seq_key in self.dic:
             self.stream_count -= 1
+            self.min_seq_dic.pop(next_seq_key)
             cur = self.dic.pop(next_seq_key)
             if cur.is_head_for_seq(next_seq_key):
                 next_seq_key = cur.next_seq
@@ -124,6 +133,7 @@ class StreamBase:
 
         self.dic[seq_stream.head_seq] = seq_stream
         self.dic[seq_stream.next_seq] = seq_stream
+        self.min_seq_dic[seq_stream.head_seq] = seq_stream
 
     def _insert_in_stream(self, seq: int, next_seq: int, pkt: TCP):
         if next_seq not in self.dic:
@@ -132,8 +142,10 @@ class StreamBase:
         if self.dic[next_seq].is_next_for_seq(next_seq):
             return
         pkts = self.dic.pop(next_seq)
+        self.min_seq_dic.pop(next_seq)
         pkts.insert_pkt(pkt)
         self.dic[seq] = pkts
+        self.min_seq_dic[seq] = pkts
 
     def _build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
@@ -141,6 +153,7 @@ class StreamBase:
         self.dic[seq] = new_stream
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
+        self.min_seq_dic[seq] = new_stream
 
     def __hash__(self) -> int:
         return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
@@ -156,6 +169,7 @@ class ReContructBase:
         self.stream_dic = defaultdict(None)
         self.target_writer = NIOWriter(dir=target_path)
         self.write_thread = Thread(target=self.target_writer.start_loop)
+        self.write_thread.start()
 
     def set_file(self, abs_path: str = '', file_path: str = ''):
         self.pcap_file = os.path.join(abs_path, file_path)
@@ -171,6 +185,13 @@ class ReContructBase:
                 if tcp is None:
                     continue
                 self.__construct(tcp, src, dst)
+        
+        for stream_value in self.stream_dic.values():
+            stream_value.flush()
+        
+        while self.write_thread.is_alive():
+            self.target_writer.quit()
+            time.sleep(1)
 
     def __parse_eth(self, pkt: dpkt.Packet) -> Ethernet:
         try:
@@ -194,7 +215,7 @@ class ReContructBase:
         dport = pkt.dport
         key = self._hash_for_four_meta(src, sport, dst, dport)
         if key not in self.stream_dic:
-            self.stream_dic[key] = StreamBase(src, dst, sport, dport)
+            self.stream_dic[key] = StreamBase(src, dst, sport, dport, writer=self.target_writer)
 
         if self.stream_dic[key].append_pkt(pkt):
-            self.stream_dic.remove(key)
+            self.stream_dic.pop(key)

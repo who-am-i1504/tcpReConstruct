@@ -20,7 +20,7 @@ class NIOWriter:
         self.max_thread_num = max_thread_num
         self.executor = THREAD_POOL_FOR_WRITER
         self.loop = asyncio.new_event_loop()
-        self.sema = asyncio.Semaphore(sema_num, loop=self.loop)
+        self.semaphore = asyncio.Semaphore(sema_num)
         self.dic = {}
         self.tag_que = queue.Queue(maxsize=sema_num)
         self.tag = False
@@ -30,7 +30,7 @@ class NIOWriter:
 
     async def write(self, abs_file_path, data):
         async with aiofiles.open(abs_file_path,
-                                 'ab+', executor=self.executor) as f, self.sema:
+                                 'ab+', executor=self.executor) as f, self.semaphore:
             if isinstance(data, list):
                 for d in data:
                     if len(d) == 0:
