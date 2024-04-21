@@ -63,7 +63,7 @@ class NIOWriter:
         self.task.append(task)
 
     async def main(self):
-        while not self.tag:
+        while True:
             if self.queue.empty():
                 if self.tag:
                     self._lock_for_dic.acquire()

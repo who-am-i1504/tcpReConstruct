@@ -122,13 +122,13 @@ class StreamBase:
         next_seq_key = next_seq
         while next_seq_key in self.dic:
             self.stream_count -= 1
-            self.min_seq_dic.pop(next_seq_key)
+            self.min_seq_dic.pop(next_seq_key, None)
             cur = self.dic.pop(next_seq_key)
             if cur.is_head_for_seq(next_seq_key):
                 next_seq_key = cur.next_seq
                 seq_stream.append(cur)
             else:
-                self.dic.pop(cur.head_seq)
+                self.dic.pop(cur.head_seq, None)
                 break
 
         self.dic[seq_stream.head_seq] = seq_stream
