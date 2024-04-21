@@ -29,30 +29,42 @@ class NIOWriter:
         self.dir_path = dir
 
     def _is_empty_content(self, data):
+        if data is None:
+            return True
         if len(data) == 0:
             return True
         return all(len(d) == 0 for d in data) if isinstance(data, list) else False
 
-    async def write(self, abs_file_path, data):
+    async def write(self, abs_file_path):
+        data = self.get_data_list_from_dic(abs_file_path)
         if self._is_empty_content(data):
+            self.realse_task(abs_file_path)
             return
         async with aiofiles.open(abs_file_path,
                                  'ab+', executor=self.executor) as f, self.semaphore:
-            if isinstance(data, list):
-                for d in data:
-                    if len(d) == 0:
-                        continue
-                    await f.write(d)
-            else:
-                await f.write(data)
+            while not self._is_empty_content(data):
+                if isinstance(data, list):
+                    for d in data:
+                        if len(d) == 0:
+                            continue
+                        await f.write(d)
+                else:
+                    await f.write(data)
+                data = self.get_data_list_from_dic(abs_file_path)
             await f.close()
-        self._lock_for_dic.acquire()
-        try:
-            self.dic.pop(abs_file_path, None)
-            self.thread_num -= 1
-        finally:
-            self._lock_for_dic.release()
         self.queue.task_done()
+
+    def get_data_list_from_dic(self, abs_file_path):
+        try:
+            self._lock_for_dic.acquire()
+            data_list = self.dic.pop(abs_file_path, None)
+            if not self._is_empty_content(data_list):
+                self.dic[abs_file_path] = []
+            else:
+                self.thread_num -= 1
+            return data_list
+        finally:
+             self._lock_for_dic.release()
 
     def start_loop(self):
         self.loop.create_task(self.main())
@@ -64,9 +76,9 @@ class NIOWriter:
         finally:
             self.loop.close()
 
-    def add_in_loop(self, abs_file_path, data):
+    def add_in_loop(self, abs_file_path):
         loop = asyncio.get_running_loop()
-        task = loop.create_task(self.write(abs_file_path, data))
+        task = loop.create_task(self.write(abs_file_path))
         self.task.append(task)
 
     async def main(self):
@@ -95,7 +107,7 @@ class NIOWriter:
                         self.dic[abs_path].extend(datas)
                     else:
                         self.dic[abs_path] = datas
-                        self.add_in_loop(abs_path, datas)
+                        self.add_in_loop(abs_path)
                         self.thread_num += 1
                 finally:
                     self._lock_for_dic.release()
