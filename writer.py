@@ -38,7 +38,7 @@ class NIOWriter:
     async def write(self, abs_file_path):
         data = self.get_data_list_from_dic(abs_file_path)
         if self._is_empty_content(data):
-            self.realse_task(abs_file_path)
+            self.task_done()
             return
         async with aiofiles.open(abs_file_path,
                                  'ab+', executor=self.executor) as f, self.semaphore:
