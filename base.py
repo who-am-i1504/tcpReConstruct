@@ -34,13 +34,15 @@ def inet_to_str(inet):
 
 class SubStreamBase:
 
-    def __init__(self, head_seq: int, next_seq: int, writer: NIOWriter, abs_path: str, timestamp: time.time()) -> None:
+    def __init__(self, head_seq: int, next_seq: int, writer: NIOWriter,
+                 abs_path: str, timestamp: float = time.time(), id_number: int = 0):
         self.head_seq = head_seq
         self.next_seq = next_seq
         self.datas = []
         self.writer = writer
         self.timestamp = timestamp
         self.abs_path = abs_path
+        self.id_number = id_number
 
     def is_head_for_seq(self, seq: int) -> bool:
         return self.head_seq == seq
@@ -65,10 +67,16 @@ class SubStreamBase:
         self.next_seq = max(self.next_seq, stream.next_seq)
 
     def flush(self):
+        self._flush(self.datas)
+        self.datas = []
+
+    def _file_name(self):
+        return f'{self.timestamp}_{self.abs_path}_{self.id_number}'
+
+    def _flush(self, datas):
         if self.writer is None:
             return
-        self.writer.put(self.abs_path, self.datas)
-        self.datas = []
+        self.writer.put(self._file_name(), datas)
 
 
 class StreamBase:
@@ -94,8 +102,8 @@ class StreamBase:
         for seq, seq_stream in self.min_seq_dic.items():
             seq_stream.flush()
 
-    def _file_name(self, seq_for_stream=0):
-        return f'{self.timestamp}-{inet_to_str(self.src)}-{self.sport}_{inet_to_str(self.dst)}-{self.dport}_{seq_for_stream}'
+    def _file_name(self):
+        return f'{inet_to_str(self.src)}-{self.sport}_{inet_to_str(self.dst)}-{self.dport}'
 
     def append_pkt(self, pkt: TCP) -> bool:
         seq = pkt.seq
@@ -127,7 +135,7 @@ class StreamBase:
         seq_stream.append_pkt(pkt, next_seq)
         next_seq_key = next_seq
         while next_seq_key in self.dic:
-            self.stream_count -= 1
+            # self.stream_count -= 1
             self.min_seq_dic.pop(next_seq_key, None)
             cur = self.dic.pop(next_seq_key)
             if cur.is_head_for_seq(next_seq_key):
@@ -156,7 +164,7 @@ class StreamBase:
     def _build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
         new_stream = SubStreamBase(seq, next_seq, self.target_writer, self._file_name(
-            self.stream_count), self.timestamp)
+        ), self.timestamp, self.stream_count)
         self.dic[seq] = new_stream
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
