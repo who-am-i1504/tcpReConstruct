@@ -32,6 +32,12 @@ def inet_to_str(inet):
         return inet_ntop(AF_INET6, inet)
 
 
+def four_meta_item_str(src: Buffer, sport: int, dst: Buffer, dport: int) -> str:
+    return f"{inet_to_str(src)}:{sport}_{inet_to_str(dst)}:{dport}"
+
+def four_meta_file_name(src: Buffer, sport: int, dst: Buffer, dport: int) -> str:
+    return f'{inet_to_str(src)}-{sport}_{inet_to_str(dst)}-{dport}'
+
 class SubStreamBase:
 
     def __init__(self, head_seq: int, next_seq: int, writer: NIOWriter,
@@ -79,9 +85,20 @@ class SubStreamBase:
         self.writer.put(self._file_name(), datas)
 
 
-class StreamBase:
+class StreamInterface:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def append_pkt(self, pkt: TCP, src: Buffer, dst: Buffer) -> bool:
+        pass
+
+    def flush(self):
+        pass
+
+
+class StreamBase(StreamInterface):
     def __init__(self, src: Buffer, dst: Buffer,
-                 sport: int, dport: int, writer: NIOWriter = None, timestamp=time.time()):
+                 sport: int, dport: int, writer: NIOWriter = None, timestamp: float = time.time()):
         self.src = src
         self.dst = dst
         self.sport = sport
@@ -103,9 +120,9 @@ class StreamBase:
             seq_stream.flush()
 
     def _file_name(self):
-        return f'{inet_to_str(self.src)}-{self.sport}_{inet_to_str(self.dst)}-{self.dport}'
+        return four_meta_file_name(self.src, self.sport, self.dst, self.dport)
 
-    def append_pkt(self, pkt: TCP) -> bool:
+    def append_pkt(self, pkt: TCP, src: Buffer, dst: Buffer) -> bool:
         seq = pkt.seq
         next_seq = pkt.seq + len(pkt.data)
         if (pkt.flags & TH_SYN) == TH_SYN:
@@ -135,7 +152,6 @@ class StreamBase:
         seq_stream.append_pkt(pkt, next_seq)
         next_seq_key = next_seq
         while next_seq_key in self.dic:
-            # self.stream_count -= 1
             self.min_seq_dic.pop(next_seq_key, None)
             cur = self.dic.pop(next_seq_key)
             if cur.is_head_for_seq(next_seq_key):
@@ -199,7 +215,7 @@ class ReContructBase:
                 tcp, src, dst = self.__upack_tcp(eth)
                 if tcp is None:
                     continue
-                self.__construct(tcp, src, dst)
+                self.__construct(tcp, src, dst, timestamp)
 
         for stream_value in self.stream_dic.values():
             stream_value.flush()
@@ -223,15 +239,96 @@ class ReContructBase:
         return ip.data, ip.src, ip.dst
 
     def _hash_for_four_meta(self, src: Buffer, sport: int, dst: Buffer, dport: int):
-        return f"{inet_to_str(src)}:{sport}_{inet_to_str(dst)}:{dport}"
+        return four_meta_item_str(src, sport, dst, dport)
 
-    def __construct(self, pkt: TCP, src: Buffer, dst: Buffer):
+    def __construct(self, pkt: TCP, src: Buffer, dst: Buffer, ts: float):
         sport = pkt.sport
         dport = pkt.dport
         key = self._hash_for_four_meta(src, sport, dst, dport)
         if key not in self.stream_dic:
-            self.stream_dic[key] = StreamBase(
-                src, dst, sport, dport, writer=self.target_writer)
+            self.stream_dic[key] = self._construct(src, dst, sport, dport, ts)
 
-        if self.stream_dic[key].append_pkt(pkt):
+        if self.stream_dic[key].append_pkt(pkt, src, dst):
             self.stream_dic.pop(key)
+
+    def _construct(self, src: Buffer, dst: Buffer,
+                   sport: int, dport: int, ts: float) -> StreamInterface:
+        return StreamBase(src, dst, sport, dport,
+                          writer=self.target_writer, timestamp=ts)
+
+
+class TwoToOneMetaItem:
+    def __init__(self, src: Buffer, sport: int, dst: Buffer, dport: int):
+        self.src = src
+        self.dst = dst
+        self.sport = sport
+        self.dport = dport
+
+    def __hash__(self) -> int:
+        return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
+
+    def _eq_ip(self, source: Buffer, target: Buffer) -> bool:
+        return inet_to_str(source) == inet_to_str(target)
+
+    def _actual_eq(self, value: object) -> bool:
+        return self.sport == value.sport and self.dport == value.dport and self._eq_ip(self.src, value.src) and self._eq_ip(self.dst, value.dst)
+
+    def _reverse_eq(self, value: object) -> bool:
+        return self.sport == value.dport and self.dport == value.sport and self._eq_ip(self.src, value.dst) and self._eq_ip(self.dst, value.src)
+
+    def __eq__(self, value: object) -> bool:
+        return self._actual_eq(value) or self._reverse_eq(value)
+    
+    def __str__(self) -> str:
+        return four_meta_file_name(self.src, self.sport, self.dst, self.dport)
+
+class OneStreamBase(StreamBase):
+    
+    def __init__(self, *args, **kwargs):
+        super(OneStreamBase, self).__init__(*args, **kwargs)
+    
+    def set_file_name(self, file_name: str):
+        self.file_name = file_name
+    
+    def _file_name(self):
+        return self.file_name
+    
+    def flush_seq(self, ack: int):
+        if ack not in self.dic:
+            return
+        self.dic[ack].flush()
+
+class TwoToOneStreamBase(StreamInterface):
+
+    def __init__(self, src: Buffer, dst: Buffer, sport: int, dport: int, writer: NIOWriter = None, timestamp: float = time.time()):
+        self.meta_item = TwoToOneMetaItem(src, sport, dst, dport)
+        self.stream_dic = defaultdict(None)
+        self.writer = writer
+        self.timestamp = timestamp
+
+    def append_pkt(self, pkt: TCP, src: Buffer, dst: Buffer) -> bool:
+        key = four_meta_item_str(src, pkt.sport, dst, pkt.dport)
+        reverse_key = four_meta_item_str(dst, pkt.dport, src, pkt.sport)
+        if reverse_key in self.stream_dic:
+            self.stream_dic[reverse_key].flush_seq(pkt.ack)
+        if key not in self.stream_dic:
+            self.stream_dic[key] = OneStreamBase(src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
+            self.stream_dic[key].set_file_name(str(self.meta_item))
+        return self.stream_dic[key].append_pkt(pkt, src, dst)
+
+    def flush(self):
+        for key, stream in self.stream_dic.items():
+            stream.flush()
+
+
+class ReConstructTwoToOne(ReContructBase):
+
+    def __init__(self, *args, **kwargs):
+        super(ReConstructTwoToOne, self).__init__(*args, **kwargs)
+
+    def _hash_for_four_meta(self, src: Buffer, sport: int, dst: Buffer, dport: int):
+        return TwoToOneMetaItem(src, sport, dst, dport)
+
+    def _construct(self, src: Buffer, dst: Buffer,
+                   sport: int, dport: int, timestamp: float) -> StreamInterface:
+        return TwoToOneStreamBase(src, dst, sport, dport, self.target_writer, timestamp)

@@ -38,7 +38,7 @@ class NIOWriter:
     async def write(self, abs_file_path):
         data = self.get_data_list_from_dic(abs_file_path)
         if self._is_empty_content(data):
-            self.task_done()
+            self.queue.task_done()
             return
         async with aiofiles.open(abs_file_path,
                                  'ab+', executor=self.executor) as f, self.semaphore:
@@ -58,9 +58,7 @@ class NIOWriter:
         try:
             self._lock_for_dic.acquire()
             data_list = self.dic.pop(abs_file_path, None)
-            if not self._is_empty_content(data_list):
-                self.dic[abs_file_path] = []
-            else:
+            if self._is_empty_content(data_list):
                 self.thread_num -= 1
             return data_list
         finally:
