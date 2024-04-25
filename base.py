@@ -62,29 +62,38 @@ class SubStreamBase:
         return self.head_seq == self.next_seq
 
     def append_pkt(self, pkt: TCP, next_seq: int):
-        self.datas.append(pkt.data)
+        self._append_pkt(pkt)
         self.next_seq = next_seq
 
+    def _append_pkt(self, pkt: TCP):
+        self.datas.append(pkt.data)
+
     def insert_pkt(self, pkt: TCP):
-        self.datas.insert(0, pkt.data)
+        self._insert_pkt(pkt)
         self.head_seq = pkt.seq
 
+    def _insert_pkt(self, pkt: TCP):
+        self.datas.insert(0, pkt.data)
+
     def append(self, stream: object):
-        self.datas.extend(stream.datas)
+        self._extend(stream)
         self.head_seq = min(self.head_seq, stream.head_seq)
         self.next_seq = max(self.next_seq, stream.next_seq)
 
+    def _extend(self, stream: object):
+        self.datas.extend(stream.datas)
+
     def flush(self):
-        self._flush(self.datas)
-        self.datas = []
+        if self.writer is None:
+            return
+        self._flush()
 
     def _file_name(self):
         return f'{self.timestamp}_{self.abs_path}_{self.id_number}'
 
-    def _flush(self, datas):
-        if self.writer is None:
-            return
-        self.writer.put(self._file_name(), datas)
+    def _flush(self):
+        self.writer.put(self._file_name(), self.datas)
+        self.datas = []
 
 
 class StreamInterface:
