@@ -29,4 +29,5 @@ class BytesIOSubStreamBase(SubStreamBase):
     
     def _flush(self):
         self.writer.put(self._file_name(), [self.byte_io.getvalue()])
+        self.byte_io = BytesIO()
     
