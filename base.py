@@ -35,8 +35,10 @@ def inet_to_str(inet):
 def four_meta_item_str(src: Buffer, sport: int, dst: Buffer, dport: int) -> str:
     return f"{inet_to_str(src)}:{sport}_{inet_to_str(dst)}:{dport}"
 
+
 def four_meta_file_name(src: Buffer, sport: int, dst: Buffer, dport: int) -> str:
     return f'{inet_to_str(src)}-{sport}_{inet_to_str(dst)}-{dport}'
+
 
 class SubStreamBase:
 
@@ -167,7 +169,7 @@ class StreamBase(StreamInterface):
 
     def _insert_in_stream(self, seq: int, next_seq: int, pkt: TCP):
         if next_seq not in self.dic:
-            self._build_new_stream(seq, next_seq, pkt)
+            self.__build_new_stream(seq, next_seq, pkt)
             return
         if self.dic[next_seq].is_next_for_seq(next_seq):
             return
@@ -177,14 +179,17 @@ class StreamBase(StreamInterface):
         self.dic[seq] = pkts
         self.min_seq_dic[seq] = pkts
 
-    def _build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
+    def __build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
-        new_stream = SubStreamBase(seq, next_seq, self.target_writer, self._file_name(
-        ), self.timestamp, self.stream_count)
+        new_stream = self._build_new_stream(seq, next_seq)
         self.dic[seq] = new_stream
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
         self.min_seq_dic[seq] = new_stream
+
+    def _build_new_stream(self, seq: int, next_seq: int) -> SubStreamBase:
+        return SubStreamBase(seq, next_seq, self.target_writer,
+                             self._file_name(), self.timestamp, self.stream_count)
 
     def __hash__(self) -> int:
         return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
@@ -278,25 +283,27 @@ class TwoToOneMetaItem:
 
     def __eq__(self, value: object) -> bool:
         return self._actual_eq(value) or self._reverse_eq(value)
-    
+
     def __str__(self) -> str:
         return four_meta_file_name(self.src, self.sport, self.dst, self.dport)
 
+
 class OneStreamBase(StreamBase):
-    
+
     def __init__(self, *args, **kwargs):
         super(OneStreamBase, self).__init__(*args, **kwargs)
-    
+
     def set_file_name(self, file_name: str):
         self.file_name = file_name
-    
+
     def _file_name(self):
         return self.file_name
-    
+
     def flush_seq(self, ack: int):
         if ack not in self.dic:
             return
         self.dic[ack].flush()
+
 
 class TwoToOneStreamBase(StreamInterface):
 
@@ -312,7 +319,8 @@ class TwoToOneStreamBase(StreamInterface):
         if reverse_key in self.stream_dic:
             self.stream_dic[reverse_key].flush_seq(pkt.ack)
         if key not in self.stream_dic:
-            self.stream_dic[key] = OneStreamBase(src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
+            self.stream_dic[key] = OneStreamBase(
+                src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
             self.stream_dic[key].set_file_name(str(self.meta_item))
         return self.stream_dic[key].append_pkt(pkt, src, dst)
 
