@@ -6,6 +6,10 @@ from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor
 from typing_extensions import Buffer
 import threading
+try:
+    from BytesIO import BytesIO
+except ImportError:
+    from io import BytesIO
 
 THRESHOLD_FOR_WRITER = 20
 THREAD_POOL_FOR_WRITER = ThreadPoolExecutor(max_workers=20)
@@ -33,7 +37,12 @@ class NIOWriter:
             return True
         if len(data) == 0:
             return True
-        return all(len(d) == 0 for d in data) if isinstance(data, list) else False
+        return all(self._is_empty_for_item(d) for d in data) if isinstance(data, list) else False
+
+    def _is_empty_for_item(self, data_item) -> bool:
+        if isinstance(data_item, BytesIO):
+            return data_item.tell() == 0
+        return len(data_item) == 0
 
     async def write(self, abs_file_path):
         data = self.get_data_list_from_dic(abs_file_path)
@@ -43,16 +52,25 @@ class NIOWriter:
         async with aiofiles.open(abs_file_path,
                                  'ab+', executor=self.executor) as f, self.semaphore:
             while not self._is_empty_content(data):
-                if isinstance(data, list):
-                    for d in data:
-                        if len(d) == 0:
-                            continue
-                        await f.write(d)
-                else:
-                    await f.write(data)
+                await self.write_to_file(data, f)
                 data = self.get_data_list_from_dic(abs_file_path)
             await f.close()
         self.queue.task_done()
+
+    async def write_to_file(self, data, f):
+        if isinstance(data, list):
+            for d in data:
+                if self._is_empty_for_item(d):
+                    continue
+                await self.write_to_file(d, f)
+            return
+        if isinstance(data, bytes):
+            await f.write(data)
+            return
+        
+        if isinstance(data, BytesIO):
+            await f.write(data.read())
+            data.close()
 
     def get_data_list_from_dic(self, abs_file_path):
         try:

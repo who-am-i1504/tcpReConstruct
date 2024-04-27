@@ -328,11 +328,14 @@ class TwoToOneStreamBase(StreamInterface):
         if reverse_key in self.stream_dic:
             self.stream_dic[reverse_key].flush_seq(pkt.ack)
         if key not in self.stream_dic:
-            self.stream_dic[key] = OneStreamBase(
-                src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
+            self.stream_dic[key] = self._build_stream_base(pkt, src, dst)
             self.stream_dic[key].set_file_name(str(self.meta_item))
         return self.stream_dic[key].append_pkt(pkt, src, dst)
 
+    def _build_stream_base(self, pkt: TCP, src: Buffer, dst: Buffer) -> OneStreamBase:
+        return OneStreamBase(
+                src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
+    
     def flush(self):
         for key, stream in self.stream_dic.items():
             stream.flush()
