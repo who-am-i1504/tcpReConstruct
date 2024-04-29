@@ -1,5 +1,4 @@
-from base import ReContructBase
+from base import ReContructBase, ReConstructTwoToOne
 
-construct = ReContructBase(r'C:\Users\29161\Documents\Code\tcpReConstruct\build')
-construct.set_file(r'C:\Users\29161\Documents\Code\tcpReConstruct\test\data\outside.tcpdump', 'outside.tcpdump')
+construct = ReConstructTwoToOne(r'C:\Users\29161\Documents\Code\tcpReConstruct\test\data', 'Thursday-WorkingHours.pcap')
 construct.construct()

@@ -6,7 +6,9 @@ from dpkt.ip import IP
 from dpkt.tcp import TCP, TH_FIN, TH_SYN, TH_RST, TH_PUSH, TH_ACK, TH_URG, TH_ECE, TH_CWR, TH_NS
 from dpkt.dpkt import NeedData
 from dpkt.pcap import Reader as PReader
+from dpkt.pcapng import Reader as PGReader
 from dpkt.ethernet import Ethernet
+from dpkt.sll import SLL
 from threading import Thread
 from socket import inet_ntop
 from socket import AF_INET
@@ -209,19 +211,36 @@ class StreamBase(StreamInterface):
 
 class ReContructBase:
 
-    def __init__(self, target_path=None):
+    def __init__(self, abs_path: str, pcap_name: str, target_path: str = 'rebuild'):
         self.seq_pqueue = queue.PriorityQueue()
         self.stream_dic = defaultdict(None)
-        self.target_writer = NIOWriter(dir=target_path)
+        self.target_writer = NIOWriter(
+            dir=self.__set_target_path(abs_path, target_path))
         self.write_thread = Thread(target=self.target_writer.start_loop)
         self.write_thread.start()
+        self.pcap_file = os.path.join(abs_path, pcap_name)
 
-    def set_file(self, abs_path: str = '', file_path: str = ''):
-        self.pcap_file = os.path.join(abs_path, file_path)
+    def __set_target_path(self, abs_path: str, target_path: str) -> str:
+        abs_target_path = os.path.join(abs_path, target_path)
+        if os.path.exists(abs_target_path):
+            return abs_target_path
+        os.mkdir(abs_target_path)
+        return abs_target_path
+
+    def _getReader(self, f):
+        try:
+            return PReader(f)
+        except Exception:
+            pass
+    
+        try:
+            return PGReader(f)
+        except Exception:
+            return None
 
     def construct(self):
         with open(self.pcap_file, 'rb') as f:
-            pcap_reader = PReader(f)
+            pcap_reader = self._getReader(f)
             for timestamp, pkt in pcap_reader:
                 eth = self.__parse_eth(pkt)
                 if eth is None:
@@ -241,6 +260,10 @@ class ReContructBase:
     def __parse_eth(self, pkt: dpkt.Packet) -> Ethernet:
         try:
             return Ethernet(pkt)
+        except NeedData:
+            pass
+        try:
+            return SLL(pkt)
         except NeedData:
             return None
 
@@ -334,8 +357,8 @@ class TwoToOneStreamBase(StreamInterface):
 
     def _build_stream_base(self, pkt: TCP, src: Buffer, dst: Buffer) -> OneStreamBase:
         return OneStreamBase(
-                src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
-    
+            src, dst, pkt.sport, pkt.dport, writer=self.writer, timestamp=self.timestamp)
+
     def flush(self):
         for key, stream in self.stream_dic.items():
             stream.flush()

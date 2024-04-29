@@ -29,11 +29,11 @@ class BytesIOSubStreamBase(SubStreamBase):
         self.byte_io.write(stream.byte_io.getvalue())
 
     def _flush(self):
-        self._flush_protcol()
+        self._flush_protcol(self.byte_io)
         self.byte_io = BytesIO()
 
-    def _flush_protcol(self):
-        self.writer.put(self._file_name(), [self.byte_io.getvalue()])
+    def _flush_protcol(self, byte_io: BytesIO):
+        self.writer.put(self._file_name(), [byte_io])
 
 
 class BytesStreamBase(OneStreamBase):
@@ -78,17 +78,27 @@ class HttpSubStreamBase(BytesIOSubStreamBase):
     def _response_bytes(self, resp: Response) -> bytes:
         return bytes(resp)
 
-    def _flush_protcol(self):
-        byte_value = self.byte_io.getvalue()
+    def _flush_protcol(self, byte_io: BytesIO):
+        byte_value = byte_io.read()
         try:
-            self.writer(self._file_name(),
-                        [self._request_bytes(Request(byte_value))])
+            self.writer.put(self._file_name(), [
+                            self._request_bytes(Request(byte_value))])
             return
         except Exception:
             pass
 
         try:
-            self.writer(self._file_name(),
-                        [self._response_bytes(Response(byte_value))])
+            self.writer.put(self._file_name(), [
+                            self._response_bytes(Response(byte_value))])
         except Exception:
             pass
+
+
+class HttpStreamBase(BytesStreamBase):
+
+    def __init__(self, *args, **kwargs):
+        super(HttpStreamBase, self).__init__(*args, **kwargs)
+
+    def _build_new_stream(self, seq: int, next_seq: int) -> SubStreamBase:
+        return HttpSubStreamBase(seq, next_seq, self.target_writer,
+                                 self._file_name(), self.timestamp, self.stream_count)
