@@ -14,6 +14,8 @@ from socket import inet_ntop
 from socket import AF_INET
 from socket import AF_INET6
 import time
+import concurrent.futures
+import threading
 from typing_extensions import Buffer, LiteralString, TypeAlias
 import os
 from writer import NIOWriter
@@ -219,6 +221,7 @@ class ReContructBase:
         self.write_thread = Thread(target=self.target_writer.start_loop)
         self.write_thread.start()
         self.pcap_file = os.path.join(abs_path, pcap_name)
+        self.lock = threading.Lock()
 
     def __set_target_path(self, abs_path: str, target_path: str) -> str:
         abs_target_path = os.path.join(abs_path, target_path)
@@ -228,28 +231,40 @@ class ReContructBase:
         return abs_target_path
 
     def _getReader(self, f):
-        try:
-            return PReader(f)
-        except Exception:
-            pass
-    
+        # try:
+        #     return PReader(f)
+        # except Exception:
+        #     pass
+
         try:
             return PGReader(f)
         except Exception:
             return None
 
+    def _construct_for_multi_process(self, timestamp: float, pkt: dpkt.Packet) -> bool:
+        eth = self.__parse_eth(pkt)
+        if eth is None:
+            return False
+        tcp, src, dst = self.__upack_tcp(eth)
+        if tcp is None:
+            return False
+        self.lock.acquire()
+        try:
+            self.__construct(tcp, src, dst, timestamp)
+        finally:
+            self.lock.release()
+        return True
+
     def construct(self):
         with open(self.pcap_file, 'rb') as f:
             pcap_reader = self._getReader(f)
-            for timestamp, pkt in pcap_reader:
-                eth = self.__parse_eth(pkt)
-                if eth is None:
-                    continue
-                tcp, src, dst = self.__upack_tcp(eth)
-                if tcp is None:
-                    continue
-                self.__construct(tcp, src, dst, timestamp)
-
+            result = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=7) as pool:
+                result.extend(pool.submit(
+                    self._construct_for_multi_process,
+                    timestamp, pkt) for timestamp, pkt in pcap_reader)
+                for res in result:
+                    res.result()
         for stream_value in self.stream_dic.values():
             stream_value.flush()
 
