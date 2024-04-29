@@ -259,11 +259,11 @@ class ReContructBase:
         with open(self.pcap_file, 'rb') as f:
             pcap_reader = self._getReader(f)
             result = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=7) as pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
                 result.extend(pool.submit(
                     self._construct_for_multi_process,
                     timestamp, pkt) for timestamp, pkt in pcap_reader)
-                for res in result:
+                for res in concurrent.futures.as_completed(result):
                     res.result()
         for stream_value in self.stream_dic.values():
             stream_value.flush()
