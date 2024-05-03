@@ -217,10 +217,10 @@ class StreamBase(StreamInterface):
         self._update_seq_interval(seq, next_seq)
 
     def _merge_two_stream(self, stream1: SubStreamBase, stream2: SubStreamBase):
-        self.dic.pop(stream2.head_seq)
-        self.dic.pop(stream2.next_seq)
-        self.dic.pop(stream1.next_seq)
-        stream1.extend(stream2)
+        for seq in [stream1.next_seq, stream2.head_seq, stream2.next_seq]:
+            if seq in self.dic:
+                self.dic.pop(seq)
+        stream1.append(stream2)
         self.dic[stream1.next_seq] = stream1
         self._update_seq_interval(
             stream1.head_seq, stream1.next_seq, stream2.head_seq, stream2.next_seq)
@@ -294,7 +294,7 @@ class StreamBase(StreamInterface):
         begin_seqs = [
             interval.begin for interval in itertools.chain(*interval_list)]
         end_seqs = [
-            interval.end for interval in itertools.chain(*interval_list)]
+            int(interval.end) for interval in itertools.chain(*interval_list)]
         min_seq = min(*seqs, *begin_seqs)
         max_seq = max(*seqs, *end_seqs)
         self.seq_tree.add(Interval(min_seq, max_seq + 0.1, data=self))
