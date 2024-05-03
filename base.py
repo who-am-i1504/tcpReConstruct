@@ -1,6 +1,5 @@
-import queue
 import dpkt
-from typing import Tuple
+from typing import Tuple, List, Set
 from collections import defaultdict
 from dpkt.ip import IP
 from dpkt.tcp import TCP, TH_FIN, TH_SYN, TH_RST, TH_PUSH, TH_ACK, TH_URG, TH_ECE, TH_CWR, TH_NS
@@ -10,14 +9,15 @@ from dpkt.pcapng import Reader as PGReader
 from dpkt.ethernet import Ethernet
 from dpkt.sll import SLL
 from threading import Thread
-from socket import inet_ntop
-from socket import AF_INET
-from socket import AF_INET6
+from socket import inet_ntop, AF_INET, AF_INET6
+from intervaltree import Interval, IntervalTree
+from io import IOBase
 import time
-import concurrent.futures
+import itertools
 import threading
-from typing_extensions import Buffer, LiteralString, TypeAlias
 import os
+import queue
+from typing_extensions import Buffer, LiteralString, TypeAlias
 from writer import NIOWriter
 
 
@@ -66,18 +66,30 @@ class SubStreamBase:
         return self.head_seq == self.next_seq
 
     def append_pkt(self, pkt: TCP, next_seq: int):
-        self._append_pkt(pkt)
+        if pkt.seq < self.next_seq:
+            self._append_data(pkt.data[self.next_seq - pkt.seq - 1:])
+        else:
+            self._append_pkt(pkt)
         self.next_seq = next_seq
 
     def _append_pkt(self, pkt: TCP):
         self.datas.append(pkt.data)
 
+    def _append_data(self, data: bytes):
+        self.datas.append(data)
+
     def insert_pkt(self, pkt: TCP):
-        self._insert_pkt(pkt)
+        if pkt.seq + len(pkt.data) > self.next_seq:
+            self._insert_data(pkt.data[:self.next_seq - pkt.seq + 1])
+        else:
+            self._insert_pkt(pkt)
         self.head_seq = pkt.seq
 
     def _insert_pkt(self, pkt: TCP):
         self.datas.insert(0, pkt.data)
+
+    def _insert_data(self, data: bytes):
+        self.datas.insert(0, data)
 
     def append(self, stream: object):
         self._extend(stream)
@@ -85,7 +97,21 @@ class SubStreamBase:
         self.next_seq = max(self.next_seq, stream.next_seq)
 
     def _extend(self, stream: object):
-        self.datas.extend(stream.datas)
+        if self.next_seq == stream.head_seq:
+            self.datas.extend(stream.datas)
+            return
+        skip_len = self.next_seq - stream.head_seq + 1
+        i = 0
+        tmp_datas = stream.datas
+        while i < len(tmp_datas) and skip_len != 0:
+            if skip_len >= len(tmp_datas[i]):
+                skip_len -= len(tmp_datas[i])
+                i += 1
+                continue
+            skip_len = 0
+            self._append_data(tmp_datas[i][skip_len:])
+            i += 1
+        self.datas.extend(tmp_datas[i:])
 
     def flush(self):
         if self.writer is None:
@@ -119,8 +145,7 @@ class StreamBase(StreamInterface):
         self.sport = sport
         self.dport = dport
         self.dic = {}
-        # self.seq_packet = {}
-        # self.ack_packet = {}
+        self.seq_tree = IntervalTree()
         self.stream_count = 0
         self.target_writer = writer
         self.start_output = False
@@ -143,7 +168,11 @@ class StreamBase(StreamInterface):
         if (pkt.flags & TH_SYN) == TH_SYN:
             next_seq += 1
         if seq not in self.dic:
+            if next_seq not in self.dic and self.is_restrans_pkt(seq, next_seq):
+                self.deal_restrans_pkt(seq, next_seq, pkt)
+                return False
             self._insert_in_stream(seq, next_seq, pkt)
+            self._update_seq_interval(seq, next_seq)
             return False
         pkts = self.dic[seq]
         if pkts.is_head_for_seq(seq) and not pkts.is_euqals_for_head_and_next():
@@ -151,7 +180,40 @@ class StreamBase(StreamInterface):
             return self._fin_deal(pkts=None, pkt=pkt)
 
         self._construct_mult_stream(seq, next_seq, pkt)
+        self._update_seq_interval(seq, next_seq)
         return self._fin_deal(pkts, pkt)
+
+    def is_restrans_pkt(self, seq: int, next_seq: int) -> bool:
+        return len(self.seq_tree[seq]) > 0 and len(self.seq_tree[next_seq]) > 0
+
+    def deal_restrans_pkt(self, seq: int, next_seq: int, pkt: TCP):
+        seq_intervals = self.seq_tree[seq]
+        next_seq_intervals = self.seq_tree[next_seq]
+        assert len(seq_intervals) <= 1
+        assert len(next_seq_intervals) <= 1
+
+        if len(seq_intervals) > 0:
+            if all(intervalNode.contains_point(next_seq) for intervalNode in seq_intervals):
+                # 如果一个区间既包含开始，又包含结束，说明其不需要处理
+                return
+            stream = self.dic[seq_intervals[0].begin]
+            self.dic.pop(stream.next_seq)
+            stream.append_pkt(pkt)
+            if len(next_seq_intervals) > 0:
+                next_stream = self.dic[next_seq_intervals[0].begin]
+                self.dic.pop(next_stream.head_seq)
+                self.dic.pop(next_stream.next_seq)
+                stream.extend(next_stream)
+                self.dic.pop(next_seq)
+                self.dic[stream.next_seq] = stream
+            self._update_seq_interval(seq, next_seq)
+            return
+
+        if len(next_seq_intervals) == 0:
+            return
+        stream = self.dic[next_seq_intervals[0].begin]
+        stream.insert_pkt(pkt)
+        self._update_seq_interval(seq, next_seq)
 
     def _fin_deal(self, pkts: SubStreamBase, pkt: TCP) -> bool:
         if (pkt.flags & TH_FIN) == TH_FIN:
@@ -167,6 +229,7 @@ class StreamBase(StreamInterface):
         seq_stream.append_pkt(pkt, next_seq)
         next_seq_key = next_seq
         while next_seq_key in self.dic:
+            # 实际上通常不存在多个流的合并
             self.min_seq_dic.pop(next_seq_key, None)
             cur = self.dic.pop(next_seq_key)
             if cur.is_head_for_seq(next_seq_key):
@@ -192,6 +255,22 @@ class StreamBase(StreamInterface):
         self.dic[seq] = pkts
         self.min_seq_dic[seq] = pkts
 
+    def _remove_seq_interval(self, seq: int) -> Set[Interval]:
+        intervals = self.seq_tree[seq]
+        for interval in intervals:
+            self.seq_tree.remove(interval)
+        return intervals
+
+    def _update_seq_interval(self, seq: int, next_seq: int):
+        seq_intervals = self._remove_seq_interval(seq)
+        next_intervals = self._remove_seq_interval(next_seq)
+        start = seq
+        end = next_seq
+        for interval in itertools.chain(seq_intervals, next_intervals):
+            start = min(start, interval.begin)
+            end = max(end, interval.end)
+        self.seq_tree.add(Interval(start, end))
+
     def __build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
         new_stream = self._build_new_stream(seq, next_seq)
@@ -199,6 +278,7 @@ class StreamBase(StreamInterface):
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
         self.min_seq_dic[seq] = new_stream
+        self.seq_tree.add(Interval(seq, next_seq))
 
     def _build_new_stream(self, seq: int, next_seq: int) -> SubStreamBase:
         return SubStreamBase(seq, next_seq, self.target_writer,
@@ -230,12 +310,12 @@ class ReContructBase:
         os.mkdir(abs_target_path)
         return abs_target_path
 
-    def _getReader(self, f):
-        # try:
-        #     return PReader(f)
-        # except Exception:
-        #     pass
-
+    def _getReader(self, f: IOBase):
+        try:
+            return PReader(f)
+        except Exception:
+            pass
+        f.seek(0)
         try:
             return PGReader(f)
         except Exception:
@@ -258,13 +338,21 @@ class ReContructBase:
     def construct(self):
         with open(self.pcap_file, 'rb') as f:
             pcap_reader = self._getReader(f)
-            result = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-                result.extend(pool.submit(
-                    self._construct_for_multi_process,
-                    timestamp, pkt) for timestamp, pkt in pcap_reader)
-                for res in concurrent.futures.as_completed(result):
-                    res.result()
+            for timestamp, pkt in pcap_reader:
+                eth = self.__parse_eth(pkt)
+                if eth is None:
+                    continue
+                tcp, src, dst = self.__upack_tcp(eth)
+                if tcp is None:
+                    continue
+                self.__construct(tcp, src, dst, timestamp)
+            # result = []
+            # with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            #     result.extend(pool.submit(
+            #         self._construct_for_multi_process,
+            #         timestamp, pkt) for timestamp, pkt in pcap_reader)
+            #     for res in concurrent.futures.as_completed(result):
+            #         res.result()
         for stream_value in self.stream_dic.values():
             stream_value.flush()
 
