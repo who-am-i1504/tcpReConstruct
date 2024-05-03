@@ -12,6 +12,7 @@ from threading import Thread
 from socket import inet_ntop, AF_INET, AF_INET6
 from intervaltree import Interval, IntervalTree
 from io import IOBase
+from functools import cached_property, cache
 import time
 import itertools
 import threading
@@ -21,6 +22,7 @@ from typing_extensions import Buffer, LiteralString, TypeAlias
 from writer import NIOWriter
 
 
+@cache
 def inet_to_str(inet):
     """Convert inet object to a string
 
@@ -36,10 +38,12 @@ def inet_to_str(inet):
         return inet_ntop(AF_INET6, inet)
 
 
+@cache
 def four_meta_item_str(src: Buffer, sport: int, dst: Buffer, dport: int) -> str:
     return f"{inet_to_str(src)}:{sport}_{inet_to_str(dst)}:{dport}"
 
 
+@cache
 def four_meta_file_name(src: Buffer, sport: int, dst: Buffer, dport: int) -> str:
     return f'{inet_to_str(src)}-{sport}_{inet_to_str(dst)}-{dport}'
 
@@ -174,47 +178,64 @@ class StreamBase(StreamInterface):
                 self.deal_restrans_pkt(seq, next_seq, pkt)
                 return False
             self._insert_in_stream(seq, next_seq, pkt)
-            self._update_seq_interval(seq, next_seq)
             return False
         pkts = self.dic[seq]
         if pkts.is_head_for_seq(seq) and not pkts.is_euqals_for_head_and_next():
             return self._fin_deal(pkts=None, pkt=pkt)
 
         self._construct_mult_stream(seq, next_seq, pkt)
-        self._update_seq_interval(seq, next_seq)
         return self._fin_deal(pkts, pkt)
 
     def is_restrans_pkt(self, seq: int, next_seq: int) -> bool:
-        return len(self.seq_tree[seq]) > 0 and len(self.seq_tree[next_seq]) > 0
+        return self._is_in_seq_interval(seq) and self._is_in_seq_interval(next_seq)
+
+    def _is_in_seq_interval(self, seq: int) -> bool:
+        return len(self.seq_tree[seq])
 
     def deal_restrans_pkt(self, seq: int, next_seq: int, pkt: TCP):
-        seq_intervals = self.seq_tree[seq]
-        next_seq_intervals = self.seq_tree[next_seq]
+        seq_intervals = list(self.seq_tree[seq])
+        next_seq_intervals = list(self.seq_tree[next_seq])
         assert len(seq_intervals) <= 1
         assert len(next_seq_intervals) <= 1
-
-        if len(seq_intervals) > 0:
+        if next_seq_intervals:
+            next_stream = self.dic[next_seq_intervals[0].begin]
+        if seq_intervals:
             if all(intervalNode.contains_point(next_seq) for intervalNode in seq_intervals):
                 # 如果一个区间既包含开始，又包含结束，说明其不需要处理
                 return
             stream = self.dic[seq_intervals[0].begin]
             self.dic.pop(stream.next_seq)
             stream.append_pkt(pkt)
-            if len(next_seq_intervals) > 0:
-                next_stream = self.dic[next_seq_intervals[0].begin]
-                self.dic.pop(next_stream.head_seq)
-                self.dic.pop(next_stream.next_seq)
-                stream.extend(next_stream)
-                self.dic.pop(next_seq)
-                self.dic[stream.next_seq] = stream
             self._update_seq_interval(seq, next_seq)
+            if next_seq_intervals:
+                self._merge_two_stream(stream1=stream, stream2=next_stream)
             return
 
-        if len(next_seq_intervals) == 0:
+        if not next_seq_intervals:
             return
-        stream = self.dic[next_seq_intervals[0].begin]
-        stream.insert_pkt(pkt)
+        next_stream.insert_pkt(pkt)
         self._update_seq_interval(seq, next_seq)
+
+    def _merge_two_stream(self, stream1: SubStreamBase, stream2: SubStreamBase):
+        self.dic.pop(stream2.head_seq)
+        self.dic.pop(stream2.next_seq)
+        self.dic.pop(stream1.next_seq)
+        stream1.extend(stream2)
+        self.dic[stream1.next_seq] = stream1
+        self._update_seq_interval(
+            stream1.head_seq, stream1.next_seq, stream2.head_seq, stream2.next_seq)
+
+    def _merge_streams_by_seq(self, stream: SubStreamBase, seq_id: int) -> bool:
+        intervals = list(self.seq_tree[seq_id])
+        if not intervals:
+            return False
+
+        another_stream = self.dic[intervals[0].begin]
+        if another_stream.head_seq > stream.head_seq:
+            self._merge_two_stream(stream, another_stream)
+        else:
+            self._merge_two_stream(another_stream, stream)
+        return True
 
     def _fin_deal(self, pkts: SubStreamBase, pkt: TCP) -> bool:
         if (pkt.flags & TH_FIN) == TH_FIN:
@@ -233,6 +254,7 @@ class StreamBase(StreamInterface):
             # 实际上通常不存在多个流的合并
             self.min_seq_dic.pop(next_seq_key, None)
             cur = self.dic.pop(next_seq_key)
+            self._remove_seq_interval(next_seq)
             if cur.is_head_for_seq(next_seq_key):
                 next_seq_key = cur.next_seq
                 seq_stream.append(cur)
@@ -241,8 +263,10 @@ class StreamBase(StreamInterface):
                 break
 
         self.dic[seq_stream.head_seq] = seq_stream
-        self.dic[seq_stream.next_seq] = seq_stream
-        self.min_seq_dic[seq_stream.head_seq] = seq_stream
+        if not self._merge_streams_by_seq(seq_stream, next_seq):
+            self.dic[seq_stream.next_seq] = seq_stream
+            self.min_seq_dic[seq_stream.head_seq] = seq_stream
+            self._update_seq_interval(seq, next_seq)
 
     def _insert_in_stream(self, seq: int, next_seq: int, pkt: TCP):
         if next_seq not in self.dic:
@@ -253,8 +277,11 @@ class StreamBase(StreamInterface):
         pkts = self.dic.pop(next_seq)
         self.min_seq_dic.pop(next_seq)
         pkts.insert_pkt(pkt)
-        self.dic[seq] = pkts
-        self.min_seq_dic[seq] = pkts
+
+        if not self._merge_streams_by_seq(pkts, seq):
+            self.dic[seq] = pkts
+            self.min_seq_dic[seq] = pkts
+            self._update_seq_interval(seq, next_seq)
 
     def _remove_seq_interval(self, seq: int) -> Set[Interval]:
         intervals = self.seq_tree[seq]
@@ -262,15 +289,15 @@ class StreamBase(StreamInterface):
             self.seq_tree.remove(interval)
         return intervals
 
-    def _update_seq_interval(self, seq: int, next_seq: int):
-        seq_intervals = self._remove_seq_interval(seq)
-        next_intervals = self._remove_seq_interval(next_seq)
-        start = seq
-        end = next_seq
-        for interval in itertools.chain(seq_intervals, next_intervals):
-            start = min(start, interval.begin)
-            end = max(end, interval.end)
-        self.seq_tree.add(Interval(start, end, data=self))
+    def _update_seq_interval(self, *seqs):
+        interval_list = [self._remove_seq_interval(seq) for seq in seqs]
+        begin_seqs = [
+            interval.begin for interval in itertools.chain(*interval_list)]
+        end_seqs = [
+            interval.end for interval in itertools.chain(*interval_list)]
+        min_seq = min(*seqs, *begin_seqs)
+        max_seq = max(*seqs, *end_seqs)
+        self.seq_tree.add(Interval(min_seq, max_seq + 0.1, data=self))
 
     def __build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
@@ -279,15 +306,17 @@ class StreamBase(StreamInterface):
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
         self.min_seq_dic[seq] = new_stream
-        self.seq_tree.add(Interval(seq, next_seq, data=self))
+        self.seq_tree.add(Interval(seq, next_seq + 0.1, data=self))
 
     def _build_new_stream(self, seq: int, next_seq: int) -> SubStreamBase:
         return SubStreamBase(seq, next_seq, self.target_writer,
                              self._file_name(), self.timestamp, self.stream_count)
 
+    # @cached_property
     def __hash__(self) -> int:
         return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
 
+    # @cached_property
     def __eq__(self, value: object) -> bool:
         return self.src == value.src and self.dst == value.dst and self.sport == value.sport and self.dport == value.dport
 
@@ -405,6 +434,7 @@ class TwoToOneMetaItem:
         self.sport = sport
         self.dport = dport
 
+    # @cached_property
     def __hash__(self) -> int:
         return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
 
@@ -417,9 +447,11 @@ class TwoToOneMetaItem:
     def _reverse_eq(self, value: object) -> bool:
         return self.sport == value.dport and self.dport == value.sport and self._eq_ip(self.src, value.dst) and self._eq_ip(self.dst, value.src)
 
+    # @cached_property
     def __eq__(self, value: object) -> bool:
         return self._actual_eq(value) or self._reverse_eq(value)
 
+    # @cached_property
     def __str__(self) -> str:
         return four_meta_file_name(self.src, self.sport, self.dst, self.dport)
 
