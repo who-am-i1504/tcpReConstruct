@@ -167,6 +167,8 @@ class StreamBase(StreamInterface):
         next_seq = pkt.seq + len(pkt.data)
         if (pkt.flags & TH_SYN) == TH_SYN:
             next_seq += 1
+        if seq == next_seq or len(pkt.data) == 0:
+            return self._fin_deal(pkts=None, pkt=pkt)
         if seq not in self.dic:
             if next_seq not in self.dic and self.is_restrans_pkt(seq, next_seq):
                 self.deal_restrans_pkt(seq, next_seq, pkt)
@@ -268,7 +270,7 @@ class StreamBase(StreamInterface):
         for interval in itertools.chain(seq_intervals, next_intervals):
             start = min(start, interval.begin)
             end = max(end, interval.end)
-        self.seq_tree.add(Interval(start, end))
+        self.seq_tree.add(Interval(start, end, data=self))
 
     def __build_new_stream(self, seq: int, next_seq: int, pkt: TCP):
         self.stream_count += 1
@@ -277,7 +279,7 @@ class StreamBase(StreamInterface):
         self.dic[next_seq] = new_stream
         new_stream.append_pkt(pkt, next_seq)
         self.min_seq_dic[seq] = new_stream
-        self.seq_tree.add(Interval(seq, next_seq))
+        self.seq_tree.add(Interval(seq, next_seq, data=self))
 
     def _build_new_stream(self, seq: int, next_seq: int) -> SubStreamBase:
         return SubStreamBase(seq, next_seq, self.target_writer,
