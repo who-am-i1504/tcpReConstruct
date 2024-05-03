@@ -10,7 +10,7 @@ except ImportError:
 
 
 class BytesIOSubStreamBase(SubStreamBase):
-
+    # TODO 待实现append_data、insert_data、extend等
     def __init__(self, *args, **kwargs):
         super(BytesIOSubStreamBase, self).__init__(*args, **kwargs)
         self.byte_io = BytesIO()

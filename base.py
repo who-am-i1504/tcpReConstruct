@@ -176,7 +176,6 @@ class StreamBase(StreamInterface):
             return False
         pkts = self.dic[seq]
         if pkts.is_head_for_seq(seq) and not pkts.is_euqals_for_head_and_next():
-            # TODO 重传判断，待完善
             return self._fin_deal(pkts=None, pkt=pkt)
 
         self._construct_mult_stream(seq, next_seq, pkt)
