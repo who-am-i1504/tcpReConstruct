@@ -15,11 +15,14 @@ from io import IOBase
 from functools import cached_property, cache
 import time
 import itertools
-import threading
+import threading, concurrent.futures
 import os
 import queue
 from typing_extensions import Buffer, LiteralString, TypeAlias
 from writer import NIOWriter
+
+
+SEQ_LIMIT = 0xFFFFFFFF
 
 
 @cache
@@ -71,7 +74,7 @@ class SubStreamBase:
 
     def append_pkt(self, pkt: TCP, next_seq: int):
         if pkt.seq < self.next_seq:
-            self._append_data(pkt.data[self.next_seq - pkt.seq - 1:])
+            self._append_data(pkt.data[self.next_seq % SEQ_LIMIT - pkt.seq - 1:])
         else:
             self._append_pkt(pkt)
         self.next_seq = next_seq
@@ -82,12 +85,12 @@ class SubStreamBase:
     def _append_data(self, data: bytes):
         self.datas.append(data)
 
-    def insert_pkt(self, pkt: TCP):
-        if pkt.seq + len(pkt.data) > self.next_seq:
-            self._insert_data(pkt.data[:self.next_seq - pkt.seq + 1])
+    def insert_pkt(self, pkt: TCP, seq: int):
+        if seq + len(pkt.data) > self.next_seq:
+            self._insert_data(pkt.data[:self.next_seq % SEQ_LIMIT - seq + 1])
         else:
             self._insert_pkt(pkt)
-        self.head_seq = pkt.seq
+        self.head_seq = seq
 
     def _insert_pkt(self, pkt: TCP):
         self.datas.insert(0, pkt.data)
@@ -155,6 +158,7 @@ class StreamBase(StreamInterface):
         self.start_output = False
         self.timestamp = timestamp
         self.min_seq_dic = {}
+        self.overflow_time = 0
 
     def _append_file(self, stream: SubStreamBase):
         stream.flush()
@@ -173,6 +177,10 @@ class StreamBase(StreamInterface):
             next_seq += 1
         if seq == next_seq or len(pkt.data) == 0:
             return self._fin_deal(pkts=None, pkt=pkt)
+        seq += self.overflow_time << 32
+        next_seq += self.overflow_time << 32
+        if int(next_seq / SEQ_LIMIT) > self.overflow_time:
+            self.overflow_time += 1
         if seq not in self.dic:
             if next_seq not in self.dic and self.is_restrans_pkt(seq, next_seq):
                 self.deal_restrans_pkt(seq, next_seq, pkt)
@@ -213,7 +221,7 @@ class StreamBase(StreamInterface):
 
         if not next_seq_intervals:
             return
-        next_stream.insert_pkt(pkt)
+        next_stream.insert_pkt(pkt, seq)
         self._update_seq_interval(seq, next_seq)
 
     def _merge_two_stream(self, stream1: SubStreamBase, stream2: SubStreamBase):
@@ -276,7 +284,7 @@ class StreamBase(StreamInterface):
             return
         pkts = self.dic.pop(next_seq)
         self.min_seq_dic.pop(next_seq)
-        pkts.insert_pkt(pkt)
+        pkts.insert_pkt(pkt, seq)
 
         if not self._merge_streams_by_seq(pkts, seq):
             self.dic[seq] = pkts
@@ -468,6 +476,7 @@ class OneStreamBase(StreamBase):
         return self.file_name
 
     def flush_seq(self, ack: int):
+        ack += self.overflow_time << 32
         if ack not in self.dic:
             return
         self.dic[ack].flush()
