@@ -15,7 +15,8 @@ from io import IOBase
 from functools import cached_property, cache
 import time
 import itertools
-import threading, concurrent.futures
+import threading
+import concurrent.futures
 import os
 import queue
 from typing_extensions import Buffer, LiteralString, TypeAlias
@@ -23,6 +24,7 @@ from writer import NIOWriter
 
 
 SEQ_LIMIT = 0xFFFFFFFF
+CACHE_LENGTH = 100000
 
 
 @cache
@@ -51,6 +53,18 @@ def four_meta_file_name(src: Buffer, sport: int, dst: Buffer, dport: int) -> str
     return f'{inet_to_str(src)}-{sport}_{inet_to_str(dst)}-{dport}'
 
 
+@cache
+def hash_for_four_meta(src: Buffer, dst: Buffer, sport: int, dport: int) -> int:
+    return hash(src) ^ hash(dst) ^ hash(sport) ^ hash(dport)
+
+
+@cache
+def eq_for_two_four_meta(*objects) -> bool:
+    if len(objects) & 1 == 1:
+        return False
+    return all(objects[i] == objects[i + 1] for i in range(0, len(objects), 2))
+
+
 class SubStreamBase:
 
     def __init__(self, head_seq: int, next_seq: int, writer: NIOWriter,
@@ -62,6 +76,7 @@ class SubStreamBase:
         self.timestamp = timestamp
         self.abs_path = abs_path
         self.id_number = id_number
+        self.cache_length = 0
 
     def is_head_for_seq(self, seq: int) -> bool:
         return self.head_seq == seq
@@ -74,7 +89,8 @@ class SubStreamBase:
 
     def append_pkt(self, pkt: TCP, next_seq: int):
         if pkt.seq < self.next_seq:
-            self._append_data(pkt.data[self.next_seq % SEQ_LIMIT - pkt.seq - 1:])
+            self._append_data(pkt.data[self.next_seq %
+                              SEQ_LIMIT - pkt.seq - 1:])
         else:
             self._append_pkt(pkt)
         self.next_seq = next_seq
@@ -129,8 +145,11 @@ class SubStreamBase:
         return f'{self.timestamp}_{self.abs_path}_{self.id_number}'
 
     def _flush(self):
-        self.writer.put(self._file_name(), self.datas)
-        self.datas = []
+        self.writer.put(self._file_name(), self.datas[self.cache_length:])
+        self.cache_length = len(self.datas)
+        if self.cache_length >= CACHE_LENGTH:
+            self.datas = []
+            self.cache_length = 0
 
 
 class StreamInterface:
@@ -320,13 +339,11 @@ class StreamBase(StreamInterface):
         return SubStreamBase(seq, next_seq, self.target_writer,
                              self._file_name(), self.timestamp, self.stream_count)
 
-    # @cached_property
     def __hash__(self) -> int:
-        return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
+        return hash_for_four_meta(self.src, self.dst, self.sport, self.dport)
 
-    # @cached_property
     def __eq__(self, value: object) -> bool:
-        return self.src == value.src and self.dst == value.dst and self.sport == value.sport and self.dport == value.dport
+        return eq_for_two_four_meta(self.src, value.src, self.dst, value.dst, self.sport, value.sport, self.dport, value.dport)
 
 
 class ReContructBase:
@@ -444,7 +461,7 @@ class TwoToOneMetaItem:
 
     # @cached_property
     def __hash__(self) -> int:
-        return hash(self.src) ^ hash(self.dst) ^ hash(self.sport) ^ hash(self.dport)
+        return hash_for_four_meta(self.src, self.dst, self.sport, self.dport)
 
     def _eq_ip(self, source: Buffer, target: Buffer) -> bool:
         return inet_to_str(source) == inet_to_str(target)
@@ -457,7 +474,9 @@ class TwoToOneMetaItem:
 
     # @cached_property
     def __eq__(self, value: object) -> bool:
-        return self._actual_eq(value) or self._reverse_eq(value)
+        return eq_for_two_four_meta(self.src, value.src, self.dst,
+                                    value.dst, self.sport, value.sport, self.dport, value.dport) or eq_for_two_four_meta(self.src, value.dst,
+                                                                                                                         self.src, value.dst, self.sport, value.dport, self.dport, value.sport)
 
     # @cached_property
     def __str__(self) -> str:
