@@ -12,7 +12,8 @@ except ImportError:
     from io import BytesIO
 
 THRESHOLD_FOR_WRITER = 20
-THREAD_POOL_FOR_WRITER = ThreadPoolExecutor(max_workers=THRESHOLD_FOR_WRITER)
+THREAD_POOL_FOR_WRITER = ThreadPoolExecutor(
+    max_workers=THRESHOLD_FOR_WRITER, thread_name_prefix='append-file')
 
 
 class NIOWriter:
@@ -22,11 +23,12 @@ class NIOWriter:
         self.queue = queue.Queue(maxsize=que_size)
         self.executor = THREAD_POOL_FOR_WRITER
         self.dic = {}
-        self.tag_que = asyncio.Queue(maxsize=sema_num)
+        self.tag_que = queue.Queue(maxsize=sema_num)
         self.tag = False
         self._lock_for_dic = asyncio.Lock()
         self.dir_path = dir
         self.loop = asyncio.new_event_loop()
+        self.file_loop = asyncio.new_event_loop()
         self.task_dic = {}
 
     def _is_empty_content(self, data):
@@ -46,7 +48,7 @@ class NIOWriter:
         if self._is_empty_content(data):
             return
         async with aiofiles.open(abs_file_path,
-                                 'ab+') as f:
+                                 'ab+', loop=self.loop, executor=self.executor) as f:
             while not self._is_empty_content(data):
                 await self.write_to_file(data, f)
                 data = await self.get_data_list_from_dic(abs_file_path)
@@ -86,9 +88,9 @@ class NIOWriter:
     def add_in_loop(self, abs_file_path):
         if abs_file_path not in self.task_dic:
             self.task_dic[abs_file_path] = []
-        loop = asyncio.get_running_loop()
+        # loop = asyncio.get_running_loop()
         self.task_dic[abs_file_path].append(
-            loop.create_task(self.write(abs_file_path)))
+            self.loop.create_task(self.write(abs_file_path)))
 
     async def main(self):
         while True:
@@ -98,8 +100,9 @@ class NIOWriter:
                     for value in self.task_dic.values():
                         task_list.extend(value)
                 await self.loop.gather(*task_list, return_exceptions=True)
+                break
             if not self.tag_que.empty():
-                self.tag = await self.tag_que.get()
+                self.tag = self.tag_que.get()
                 self.tag_que.task_done()
             while not self.queue.empty():
                 abs_path, datas = self.queue.get()

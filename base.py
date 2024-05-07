@@ -154,13 +154,13 @@ class SubStreamBase:
 
 class StreamInterface:
     def __init__(self, *args, **kwargs):
-        pass
+        return
 
     def append_pkt(self, pkt: TCP, src: Buffer, dst: Buffer) -> bool:
-        pass
+        return False
 
     def flush(self):
-        pass
+        return
 
 
 class StreamBase(StreamInterface):
@@ -217,11 +217,11 @@ class StreamBase(StreamInterface):
         return self._is_in_seq_interval(seq) and self._is_in_seq_interval(next_seq)
 
     def _is_in_seq_interval(self, seq: int) -> bool:
-        return len(self.seq_tree[seq])
+        return len(self.seq_tree.at(seq))
 
     def deal_restrans_pkt(self, seq: int, next_seq: int, pkt: TCP):
-        seq_intervals = list(self.seq_tree[seq])
-        next_seq_intervals = list(self.seq_tree[next_seq])
+        seq_intervals = list(self.seq_tree.at(seq))
+        next_seq_intervals = list(self.seq_tree.at(next_seq))
         assert len(seq_intervals) <= 1
         assert len(next_seq_intervals) <= 1
         if next_seq_intervals:
@@ -253,7 +253,7 @@ class StreamBase(StreamInterface):
             stream1.head_seq, stream1.next_seq, stream2.head_seq, stream2.next_seq)
 
     def _merge_streams_by_seq(self, stream: SubStreamBase, seq_id: int) -> bool:
-        intervals = list(self.seq_tree[seq_id])
+        intervals = list(self.seq_tree.at(seq_id))
         if not intervals:
             return False
 
@@ -311,7 +311,7 @@ class StreamBase(StreamInterface):
             self._update_seq_interval(seq, next_seq)
 
     def _remove_seq_interval(self, seq: int) -> Set[Interval]:
-        intervals = self.seq_tree[seq]
+        intervals = self.seq_tree.at(seq)
         for interval in intervals:
             self.seq_tree.remove(interval)
         return intervals
